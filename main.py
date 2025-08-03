@@ -62,8 +62,12 @@ class RedflagHedgeBot:
         """거래소 초기화"""
         try:
             # API 키 가져오기
-            korean_key = os.getenv(f'{korean_name.upper()}_API_KEY')
-            korean_secret = os.getenv(f'{korean_name.upper()}_API_SECRET')
+            if korean_name == 'upbit':
+                korean_key = os.getenv('UPBIT_ACCESS_KEY')
+                korean_secret = os.getenv('UPBIT_SECRET_KEY')
+            else:
+                korean_key = os.getenv(f'{korean_name.upper()}_API_KEY')
+                korean_secret = os.getenv(f'{korean_name.upper()}_API_SECRET')
             futures_key = os.getenv(f'{futures_name.upper()}_API_KEY')
             futures_secret = os.getenv(f'{futures_name.upper()}_API_SECRET')
             

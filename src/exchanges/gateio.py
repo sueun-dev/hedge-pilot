@@ -37,11 +37,13 @@ class GateIOExchange:
         try:
             contracts = self.futures_api.list_futures_contracts('usdt')
             for contract in contracts:
-                symbol = f"{contract.underlying}/USDT:USDT"
+                # Extract underlying from contract name (e.g., BTC_USDT -> BTC)
+                underlying = contract.name.replace('_USDT', '')
+                symbol = f"{underlying}/USDT:USDT"
                 self.futures_markets[symbol] = {
                     'name': contract.name,
-                    'contract_size': float(contract.quanto_multiplier),
-                    'underlying': contract.underlying
+                    'contract_size': float(contract.quanto_multiplier) if contract.quanto_multiplier else 1,
+                    'underlying': underlying
                 }
             self.logger.info(f"Loaded {len(self.futures_markets)} futures markets")
         except Exception as e:
@@ -51,14 +53,24 @@ class GateIOExchange:
         """Get balance for a specific currency"""
         try:
             # Check futures balance
-            futures_balance = self.futures_api.list_futures_accounts('usdt')
+            futures_accounts = self.futures_api.list_futures_accounts('usdt')
             
             if currency == 'USDT':
-                return {
-                    'free': float(futures_balance.available),
-                    'used': float(futures_balance.margin) + float(futures_balance.order_margin),
-                    'total': float(futures_balance.total)
-                }
+                # Gate API returns a single account object for futures
+                if hasattr(futures_accounts, 'available'):
+                    # Single account object
+                    available = float(futures_accounts.available) if futures_accounts.available else 0
+                    total = float(futures_accounts.total) if futures_accounts.total else 0
+                    # Calculate used from position_margin and order_margin
+                    position_margin = float(futures_accounts.position_margin) if hasattr(futures_accounts, 'position_margin') and futures_accounts.position_margin else 0
+                    order_margin = float(futures_accounts.order_margin) if hasattr(futures_accounts, 'order_margin') and futures_accounts.order_margin else 0
+                    used = position_margin + order_margin
+                    
+                    return {
+                        'free': available,
+                        'used': used,
+                        'total': total
+                    }
             else:
                 # For other currencies, check spot balance
                 spot_accounts = self.spot_api.list_spot_accounts(currency=currency)
@@ -122,11 +134,13 @@ class GateIOExchange:
                 contract_size = contract_info.get('contract_size', 1)
                 
                 # Convert amount to contracts
-                if side == 'sell' and params and params.get('reduce_only'):
-                    # For closing short positions, amount is already in contracts
+                # OrderExecutor already converts to contracts via _calculate_futures_quantity
+                # So amount here is already in contracts
+                if params and params.get('from_order_executor'):
+                    # Amount is already in contracts from OrderExecutor
                     contracts = int(amount)
                 else:
-                    # For opening positions, convert from coin amount to contracts
+                    # Direct API call, convert from coin amount to contracts
                     contracts = int(amount / contract_size)
                 
                 if contracts < 1:

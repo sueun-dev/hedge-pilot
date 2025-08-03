@@ -126,35 +126,37 @@ class UpbitExchange:
             return None
     
     def create_market_order(self, symbol: str, side: str, amount: float, params: Optional[Dict] = None) -> Optional[Dict]:
-        """Create a market order"""
+        """Create a market order
+        
+        For buy orders: amount is in KRW (how much KRW to spend)
+        For sell orders: amount is in crypto (how much crypto to sell)
+        """
         try:
             # Convert symbol format: XRP/KRW -> KRW-XRP
             base, quote = symbol.split('/')
             market = f"{quote}-{base}"
             
             if side == 'buy':
-                # For buy orders, Upbit requires KRW amount (price parameter)
-                ticker = self.get_ticker(symbol)
-                if not ticker:
-                    return None
-                
-                # Calculate KRW amount
-                krw_amount = amount * ticker['last']
-                
+                # For buy orders, amount is already in KRW
                 order_params = {
                     'market': market,
                     'side': 'bid',
-                    'price': str(int(krw_amount)),  # KRW amount as string
+                    'price': str(int(amount)),  # KRW amount as string (integer)
                     'ord_type': 'price'  # Market buy by price
                 }
+                
+                self.logger.info(f"Buy order: {amount} KRW for {base}")
+                
             else:
-                # For sell orders, amount is the quantity
+                # For sell orders, amount is the quantity in crypto
                 order_params = {
                     'market': market,
                     'side': 'ask',
-                    'volume': str(amount),
+                    'volume': str(amount),  # Crypto amount as string
                     'ord_type': 'market'  # Market sell
                 }
+                
+                self.logger.info(f"Sell order: {amount} {base}")
             
             data = self._api_call('POST', '/v1/orders', order_params)
             

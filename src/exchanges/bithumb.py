@@ -86,10 +86,17 @@ class BithumbExchange:
             data = response.json()
             
             if data.get('status') == '0000':
+                # Return successful response
+                # For market orders, the response includes order_id directly
+                if endpoint in ['/trade/market_buy', '/trade/market_sell']:
+                    return {'order_id': data.get('order_id')}
                 return data.get('data')
             else:
-                self.logger.error(f"API error: {data.get('message')}")
-                return None
+                # Debug print for specific errors
+                error_msg = data.get('message', 'Unknown error')
+                error_code = data.get('status', 'Unknown')
+                self.logger.error(f"API error [{error_code}]: {error_msg}")
+                return None  # Return None on error
         except Exception as e:
             self.logger.error(f"Private API call failed: {e}")
             return None
@@ -100,21 +107,37 @@ class BithumbExchange:
             # Convert symbol format: XRP/KRW -> XRP_KRW
             base, quote = symbol.split('/')
             
-            data = self._public_api_call('ticker', {
+            # Get orderbook to get bid/ask prices
+            orderbook_data = self._public_api_call('orderbook', {
                 'order_currency': base,
                 'payment_currency': quote
             })
             
-            if data:
-                return {
+            # Get ticker for last price
+            ticker_data = self._public_api_call('ticker', {
+                'order_currency': base,
+                'payment_currency': quote
+            })
+            
+            if ticker_data:
+                result = {
                     'symbol': symbol,
-                    'last': float(data['closing_price']),
-                    'bid': None,  # Bithumb doesn't provide bid/ask in ticker
+                    'last': float(ticker_data['closing_price']),
+                    'bid': None,
                     'ask': None,
-                    'high': float(data['max_price']),
-                    'low': float(data['min_price']),
-                    'volume': float(data['units_traded'])
+                    'high': float(ticker_data['max_price']),
+                    'low': float(ticker_data['min_price']),
+                    'volume': float(ticker_data['units_traded'])
                 }
+                
+                # Add bid/ask from orderbook if available
+                if orderbook_data:
+                    if 'bids' in orderbook_data and len(orderbook_data['bids']) > 0:
+                        result['bid'] = float(orderbook_data['bids'][0]['price'])
+                    if 'asks' in orderbook_data and len(orderbook_data['asks']) > 0:
+                        result['ask'] = float(orderbook_data['asks'][0]['price'])
+                
+                return result
             return None
         except Exception as e:
             self.logger.error(f"Failed to get ticker for {symbol}: {e}")
@@ -123,16 +146,38 @@ class BithumbExchange:
     def get_balance(self, currency: str) -> Optional[Dict]:
         """Get balance for a specific currency"""
         try:
+            # Bithumb API는 currency를 'ALL'로 보내야 모든 잔고를 받을 수 있음
+            # 특정 통화만 요청하면 오류 발생
             params = {
-                'currency': currency
+                'currency': 'ALL'
             }
             
             data = self._private_api_call('/info/balance', params)
             
             if data:
-                total = float(data.get(f'total_{currency.lower()}', 0))
-                in_use = float(data.get(f'in_use_{currency.lower()}', 0))
-                available = float(data.get(f'available_{currency.lower()}', 0))
+                # Debug print - comment out after debugging
+                # print(f"Balance data for {currency}: {data}")
+                
+                # Handle different response formats
+                if isinstance(data, dict):
+                    # Bithumb returns balances with currency code in lowercase
+                    currency_lower = currency.lower()
+                    
+                    # For KRW, directly use the provided values
+                    if currency.upper() == 'KRW':
+                        total = float(data.get('total_krw', 0))
+                        in_use = float(data.get('in_use_krw', 0))
+                        available = float(data.get('available_krw', 0))
+                    else:
+                        # For other currencies, use currency-specific keys
+                        total = float(data.get(f'total_{currency_lower}', 0))
+                        in_use = float(data.get(f'in_use_{currency_lower}', 0))
+                        available = float(data.get(f'available_{currency_lower}', 0))
+                else:
+                    # If data is a string or other format
+                    total = 0
+                    in_use = 0
+                    available = 0
                 
                 return {
                     'free': available,
@@ -142,53 +187,83 @@ class BithumbExchange:
             return {'free': 0, 'used': 0, 'total': 0}
         except Exception as e:
             self.logger.error(f"Failed to get balance for {currency}: {e}")
-            return None
+            return {'free': 0, 'used': 0, 'total': 0}
     
     def create_market_order(self, symbol: str, side: str, amount: float, params: Optional[Dict] = None) -> Optional[Dict]:
-        """Create a market order"""
+        """Create a market order
+        
+        For buy orders: amount is in KRW (how much KRW to spend)
+        For sell orders: amount is in crypto (how much crypto to sell)
+        """
         try:
             # Convert symbol format: XRP/KRW -> XRP
             base, quote = symbol.split('/')
             
+            # Bithumb market order requires crypto units, not KRW amount
+            # So for buy orders, we need to calculate crypto units from KRW amount
+            
             if side == 'buy':
-                # For buy orders, calculate the quantity based on KRW amount
+                # Get current price to calculate crypto units
                 ticker = self.get_ticker(symbol)
                 if not ticker:
+                    self.logger.error(f"Cannot get ticker for {symbol}")
                     return None
                 
-                # Calculate quantity from KRW amount
-                quantity = amount / ticker['last']
-                # Round to 8 decimal places
-                quantity = round(quantity, 8)
+                # Use ask price for buy orders (more conservative)
+                price = ticker.get('ask') or ticker.get('last')
+                if not price:
+                    self.logger.error(f"No price available for {symbol}")
+                    return None
                 
+                # Calculate crypto units from KRW amount
+                # Round to 4 decimal places as Bithumb requires
+                crypto_units = round(amount / price, 4)
+                
+                endpoint = '/trade/market_buy'
                 order_params = {
                     'order_currency': base,
                     'payment_currency': quote,
-                    'units': str(quantity),
-                    'type': 'bid'  # market buy
+                    'units': str(crypto_units)  # Crypto units for market buy
                 }
+                
             else:
-                # For sell orders, amount is the quantity
+                # For sell, amount is already in crypto units
+                endpoint = '/trade/market_sell'
                 order_params = {
                     'order_currency': base,
                     'payment_currency': quote,
-                    'units': str(amount),
-                    'type': 'ask'  # market sell
+                    'units': str(round(amount, 4))  # Crypto amount for market sell
                 }
             
-            data = self._private_api_call('/trade/market', order_params)
+            data = self._private_api_call(endpoint, order_params)
             
             if data:
                 self.logger.info(f"Market order placed: {symbol} {side} {amount}")
+                
+                # Parse response based on Bithumb's actual format
+                order_id = data.get('order_id', 'unknown')
+                
+                # Get executed amount and cost from response
+                if side == 'buy':
+                    # For buy orders, amount is KRW spent
+                    filled = float(data.get('units', 0))  # Crypto received
+                    cost = amount  # KRW spent
+                else:
+                    # For sell orders, amount is crypto sold
+                    filled = amount  # Crypto sold
+                    cost = float(data.get('total', 0))  # KRW received
+                
                 return {
-                    'id': data.get('order_id'),
+                    'id': order_id,
                     'symbol': symbol,
                     'side': side,
                     'amount': amount,
-                    'status': 'closed',  # Market orders are immediately executed
-                    'filled': amount
+                    'status': 'closed',
+                    'filled': filled,
+                    'cost': cost
                 }
-            return None
+            else:
+                return None
             
         except Exception as e:
             self.logger.error(f"Failed to create market order: {e}")

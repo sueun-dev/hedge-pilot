@@ -17,12 +17,11 @@ class TimerManager:
     def initialize_symbol(self, symbol: str) -> None:
         """심볼별 타이머 초기화"""
         if symbol not in self.stage_timers:
-            self.stage_timers[symbol] = {
-                5: None,
-                10: None,
-                30: None,
-                50: None
-            }
+            # settings.PROFIT_STAGES에서 동적으로 타이머 레벨 생성
+            self.stage_timers[symbol] = {}
+            for target_premium, _ in settings.PROFIT_STAGES:
+                if target_premium < 100:  # 100% 이상은 즉시 실행이므로 타이머 불필요
+                    self.stage_timers[symbol][target_premium] = None
             logger.info(f"{symbol} 타이머 초기화됨")
     
     def check_profit_taking(
@@ -49,19 +48,33 @@ class TimerManager:
                 if target_premium >= 100:
                     return target_premium, close_percentage
                 
-                # 타이머 확인
-                if symbol_timers.get(target_premium) is None:
-                    # 첫 도달, 타이머 설정
+                # 타이머 확인 (None이면 처음 도달, 타이머가 있으면 쿨다운 체크)
+                timer_start = symbol_timers.get(target_premium)
+                
+                if timer_start is None:
+                    # 첫 도달, 즉시 실행하고 타이머 설정
                     self.set_timer(symbol, target_premium)
                     logger.info(
                         f"{symbol} {target_premium}% 프리미엄 도달, "
-                        f"타이머 시작 ({self.timer_duration.seconds // 60}분)"
+                        f"즉시 실행 후 {self.timer_duration.seconds // 60}분 쿨다운"
                     )
-                    return None
-                
-                # 타이머 만료 확인
-                if current_time >= symbol_timers[target_premium] + self.timer_duration:
                     return target_premium, close_percentage
+                
+                # 쿨다운 시간이 지났는지 확인
+                if current_time >= timer_start + self.timer_duration:
+                    # 쿨다운 완료, 다시 실행 가능
+                    self.set_timer(symbol, target_premium)  # 타이머 리셋
+                    logger.info(
+                        f"{symbol} {target_premium}% 쿨다운 완료, 재실행"
+                    )
+                    return target_premium, close_percentage
+                else:
+                    # 아직 쿨다운 중
+                    remaining = (timer_start + self.timer_duration) - current_time
+                    logger.debug(
+                        f"{symbol} {target_premium}% 쿨다운 중 "
+                        f"(남은 시간: {remaining.seconds // 60}분)"
+                    )
         
         return None
     

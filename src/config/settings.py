@@ -1,7 +1,7 @@
 """
 프로젝트 설정 관리
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict
 
 @dataclass
@@ -17,7 +17,7 @@ class Settings:
     
     # 이익 실현 단계 (프리미엄%, 청산비율%)
     PROFIT_STAGES = [
-        (5, 5),      # 5% 프리미엄에서 5% 청산
+        (3, 1),      # 5% 프리미엄에서 5% 청산
         (10, 10),    # 10% 프리미엄에서 10% 청산
         (30, 30),    # 30% 프리미엄에서 30% 청산
         (50, 50),    # 50% 프리미엄에서 50% 청산
@@ -25,15 +25,15 @@ class Settings:
     ]
     
     # 타이머 설정
-    STAGE_TIMER_MINUTES: int = 30  # 각 단계별 타이머 (분)
+    STAGE_TIMER_MINUTES: int = 30  # 각 단계별 쿨다운 타이머 (분)
     MAIN_LOOP_INTERVAL: int = 60   # 메인 루프 간격 (초)
     
     # 거래소별 최소 주문 크기 (USD)
-    MIN_ORDER_SIZES: Dict[str, float] = {
+    MIN_ORDER_SIZES: Dict[str, float] = field(default_factory=lambda: {
         'upbit': 5.0,     # 5,000 KRW ≈ $5
         'bithumb': 1.0,   # 1,000 KRW ≈ $1
         'gateio': 10.0    # $10 USD
-    }
+    })
     
     # 재시도 설정
     MAX_FAILED_ATTEMPTS: int = 3  # 최대 실패 허용 횟수

@@ -93,25 +93,73 @@ class OrderExecutor:
                 logger.error(f"잘못된 비율: {percentage}%")
                 return False
             
+            # 실제 보유 수량 확인
+            spot_balance = self.korean_exchange.get_balance(symbol)
+            if not spot_balance:
+                logger.error(f"{symbol} 잔고 조회 실패")
+                return False
+            
+            actual_spot_quantity = spot_balance['free']
+            logger.info(f"실제 {symbol} 보유량: {actual_spot_quantity:.8f}")
+            
             # 청산할 USD 금액 계산
             close_amount_usd = position_value_usd * (percentage / 100)
             
-            # 현재 가격으로 수량 계산
+            # 현재 가격으로 이상적인 수량 계산
             futures_ticker = self.futures_exchange.get_ticker(f"{symbol}/USDT:USDT")
             if not futures_ticker or 'bid' not in futures_ticker or 'ask' not in futures_ticker:
                 return False
             
             mid_price = (futures_ticker['bid'] + futures_ticker['ask']) / 2
-            quantity = close_amount_usd / mid_price
+            ideal_quantity = close_amount_usd / mid_price
             
+            # 실제 청산할 수량 결정 (보유량과 이상적인 수량 중 작은 값)
+            if percentage >= 100:
+                # 100% 청산 시 모든 보유량 청산
+                quantity = actual_spot_quantity
+                logger.info(f"전체 청산: {quantity:.8f} {symbol}")
+            else:
+                # 부분 청산 시 계산된 수량과 보유량 중 작은 값 사용
+                quantity = min(ideal_quantity, actual_spot_quantity)
+                
             # 빗썸은 8자리 반올림
             if self.korean_exchange.exchange_id.lower() == 'bithumb':
                 quantity = round(quantity, 8)
             
-            # 선물 수량 계산
-            futures_quantity = self._calculate_futures_quantity(symbol, quantity)
-            if futures_quantity is None:
+            # 수량이 너무 작으면 중단
+            if quantity < 0.00000001:
+                logger.warning(f"청산할 수량이 너무 작음: {quantity:.8f} {symbol}")
                 return False
+            
+            # 선물 포지션 확인 및 수량 조정
+            futures_positions = self.futures_exchange.get_positions()
+            futures_position = None
+            for pos in futures_positions:
+                if pos['symbol'] == f"{symbol}/USDT:USDT":
+                    futures_position = pos
+                    break
+            
+            if futures_position:
+                # 실제 선물 포지션 계약 수
+                actual_futures_contracts = futures_position['contracts']
+                
+                # 계산된 선물 수량
+                calculated_futures_quantity = self._calculate_futures_quantity(symbol, quantity)
+                if calculated_futures_quantity is None:
+                    return False
+                
+                # 실제 청산할 선물 계약 수 (보유 계약과 계산된 계약 중 작은 값)
+                if percentage >= 100:
+                    futures_quantity = actual_futures_contracts
+                else:
+                    futures_quantity = min(calculated_futures_quantity, actual_futures_contracts)
+                    
+                logger.info(f"선물 포지션: {actual_futures_contracts} contracts, 청산 예정: {futures_quantity} contracts")
+            else:
+                # 선물 포지션이 없으면 계산된 수량 사용
+                futures_quantity = self._calculate_futures_quantity(symbol, quantity)
+                if futures_quantity is None:
+                    return False
             
             logger.info(
                 f"{percentage}% 포지션 청산: {quantity:.8f} {symbol} 현물, "
@@ -254,13 +302,26 @@ class OrderExecutor:
         with ThreadPoolExecutor(max_workers=2) as executor:
             if operation == 'open':
                 # 포지션 열기: 현물 매수 + 선물 숏
-                spot_future = executor.submit(
-                    self.korean_exchange.create_market_order,
-                    f"{symbol}/KRW", 'buy', spot_quantity
-                )
+                # Bithumb와 Upbit 모두 매수 시 KRW 금액을 받음
+                if self.korean_exchange.exchange_id.lower() in ['bithumb', 'upbit']:
+                    # 현재 가격으로 KRW 금액 계산
+                    ticker = self.korean_exchange.get_ticker(f"{symbol}/KRW")
+                    krw_amount = spot_quantity * ticker['ask']
+                    spot_future = executor.submit(
+                        self.korean_exchange.create_market_order,
+                        f"{symbol}/KRW", 'buy', krw_amount
+                    )
+                else:
+                    # 다른 거래소는 수량을 받음
+                    spot_future = executor.submit(
+                        self.korean_exchange.create_market_order,
+                        f"{symbol}/KRW", 'buy', spot_quantity
+                    )
+                # GateIO에게 이미 계약 수로 변환되었음을 알림
+                futures_params = {'from_order_executor': True} if self.futures_exchange.exchange_id.lower() == 'gateio' else None
                 futures_future = executor.submit(
                     self.futures_exchange.create_market_order,
-                    f"{symbol}/USDT:USDT", 'sell', futures_quantity
+                    f"{symbol}/USDT:USDT", 'sell', futures_quantity, futures_params
                 )
             else:
                 # 포지션 닫기: 현물 매도 + 선물 숏 커버 (reduce_only 필수)
@@ -268,10 +329,12 @@ class OrderExecutor:
                     self.korean_exchange.create_market_order,
                     f"{symbol}/KRW", 'sell', spot_quantity
                 )
+                # GateIO에게 이미 계약 수로 변환되었음을 알림
+                futures_params = {'reduce_only': True, 'from_order_executor': True} if self.futures_exchange.exchange_id.lower() == 'gateio' else {'reduce_only': True}
                 futures_future = executor.submit(
                     self.futures_exchange.create_market_order,
                     f"{symbol}/USDT:USDT", 'buy', futures_quantity,
-                    {'reduce_only': True}  # 절대 롱 포지션 생성 방지
+                    futures_params  # 절대 롱 포지션 생성 방지
                 )
             
             try:
@@ -304,6 +367,7 @@ class OrderExecutor:
             if operation == 'open':
                 if spot_result and not futures_result:
                     logger.warning("선물 주문 실패, 현물 주문 되돌리기")
+                    # 매수한 현물을 되팔기 - 매도는 수량 기반
                     self.korean_exchange.create_market_order(
                         f"{symbol}/KRW", 'sell', spot_quantity
                     )
