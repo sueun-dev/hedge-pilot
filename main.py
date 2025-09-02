@@ -27,20 +27,18 @@ logger = logging.getLogger(__name__)
 class RedflagHedgeBot:
     """레드플래그 헤징 봇 메인 클래스"""
     
+    # 완료
     def __init__(self):
         self.bot = None
         self.korean_exchange = None
         self.futures_exchange = None
     
+    # 완료
     def get_user_input(self) -> Tuple[List[str], str, str]:
-        """사용자 입력 받기"""
-        logger.info("=== 레드플래그 헤징 봇 ===")
         
-        # 심볼 입력
         symbols_input = input("거래할 코인 심볼 (쉼표로 구분, 예: XRP,ETH,BTC): ").strip().upper()
         symbols = [s.strip() for s in symbols_input.split(',') if s.strip()]
         
-        # 한국 거래소 선택
         logger.info("한국 거래소 선택: 1. Upbit, 2. Bithumb")
         while True:
             choice = input("선택 (1-2): ").strip()
@@ -58,40 +56,43 @@ class RedflagHedgeBot:
         
         return symbols, korean_exchange, futures_exchange
     
+    # 완료
     def initialize_exchanges(self, korean_name: str, futures_name: str) -> bool:
         """거래소 초기화"""
         try:
-            # API 키 가져오기
-            if korean_name == 'upbit':
-                korean_key = os.getenv('UPBIT_ACCESS_KEY')
-                korean_secret = os.getenv('UPBIT_SECRET_KEY')
-            else:
-                korean_key = os.getenv(f'{korean_name.upper()}_API_KEY')
-                korean_secret = os.getenv(f'{korean_name.upper()}_API_SECRET')
+            # 한국 거래소 API 키 가져오기
+            korean_key = os.getenv(f'{korean_name.upper()}_API_KEY')
+            korean_secret = os.getenv(f'{korean_name.upper()}_API_SECRET')
+            
+            # 선물 거래소 API 키 가져오기
             futures_key = os.getenv(f'{futures_name.upper()}_API_KEY')
             futures_secret = os.getenv(f'{futures_name.upper()}_API_SECRET')
             
-            # 확인
             if not all([korean_key, korean_secret, futures_key, futures_secret]):
                 logger.error("API 인증 정보가 .env 파일에 없습니다.")
                 logger.error(f"필요한 환경변수:")
-                logger.error(f"  {korean_name.upper()}_API_KEY")
-                logger.error(f"  {korean_name.upper()}_API_SECRET")
-                logger.error(f"  {futures_name.upper()}_API_KEY")
-                logger.error(f"  {futures_name.upper()}_API_SECRET")
+                logger.error(f"{korean_name.upper()}_API_KEY")
+                logger.error(f"{korean_name.upper()}_API_SECRET")
+                logger.error(f"{futures_name.upper()}_API_KEY")
+                logger.error(f"{futures_name.upper()}_API_SECRET")
                 return False
             
             # 한국 거래소 초기화
             if korean_name == 'upbit':
                 self.korean_exchange = UpbitExchange(korean_key, korean_secret)
-            elif korean_name == 'bithumb':
+            else:  # korean_name == 'bithumb' (already validated in get_user_input)
                 self.korean_exchange = BithumbExchange(korean_key, korean_secret)
             
             # 선물 거래소 초기화
-            self.futures_exchange = GateIOExchange({
-                'apiKey': futures_key,
-                'secret': futures_secret
-            })
+            if futures_name == 'gateio':
+                self.futures_exchange = GateIOExchange({
+                    'apiKey': futures_key,
+                    'secret': futures_secret
+                })
+            # 나중에 다른 선물 거래소 추가 시 여기에 elif 추가
+            else:
+                logger.error(f"지원하지 않는 선물 거래소: {futures_name}")
+                return False
             
             logger.info(f"거래소 초기화 완료: {korean_name} + {futures_name}")
             return True
@@ -100,6 +101,7 @@ class RedflagHedgeBot:
             logger.error(f"거래소 초기화 실패: {e}")
             return False
     
+    # 완료
     def run(self):
         """봇 실행"""
         # 사용자 입력

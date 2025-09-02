@@ -8,6 +8,7 @@ dependencies = [
     "gate-api>=6.104.0",
     "requests>=2.31.0",
     "PyJWT>=2.8.0",
+    "colorama>=0.4.6",
 ]
 
 [project.scripts]

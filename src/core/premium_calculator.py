@@ -1,6 +1,3 @@
-"""
-김치 프리미엄 계산 모듈
-"""
 import logging
 from typing import Optional
 
@@ -27,14 +24,10 @@ class PremiumCalculator:
         try:
             # 한국 거래소 가격 조회
             korean_ticker = self.korean_exchange.get_ticker(f"{symbol}/KRW")
-            if not korean_ticker or 'last' not in korean_ticker:
-                logger.error(f"한국 거래소 {symbol} 가격 조회 실패")
+            if not korean_ticker or 'ask' not in korean_ticker:
+                logger.error(f"한국 거래소 {symbol} ask 가격 조회 실패")
                 return None
             
-            # 매수 가격 확인 (ask 가격이 없으면 중단)
-            if korean_ticker.get('ask') is None:
-                logger.error(f"{symbol} 한국 거래소 ask 가격 없음")
-                return None
             krw_ask_price = korean_ticker['ask']
             
             # USDT/KRW 환율 조회
@@ -44,14 +37,10 @@ class PremiumCalculator:
             
             # 선물 거래소 가격 조회
             futures_ticker = self.futures_exchange.get_ticker(f"{symbol}/USDT:USDT")
-            if not futures_ticker or 'last' not in futures_ticker:
-                logger.error(f"선물 거래소 {symbol} 가격 조회 실패")
+            if not futures_ticker or 'bid' not in futures_ticker:
+                logger.error(f"선물 거래소 {symbol} bid 가격 조회 실패")
                 return None
             
-            # 매도 가격 확인 (bid 가격이 없으면 중단)
-            if futures_ticker.get('bid') is None:
-                logger.error(f"{symbol} 선물 거래소 bid 가격 없음")
-                return None
             usdt_bid_price = futures_ticker['bid']
             
             # 프리미엄 계산
@@ -73,19 +62,15 @@ class PremiumCalculator:
             return None
     
     def _get_usdt_krw_rate(self) -> Optional[float]:
-        """USDT/KRW 환율 조회"""
+        """USDT/KRW 환율 조회 (ask 가격 사용)"""
         try:
             usdt_krw_ticker = self.korean_exchange.get_ticker('USDT/KRW')
             
-            if not usdt_krw_ticker:
-                logger.error("USDT/KRW 티커 조회 실패")
+            if not usdt_krw_ticker or 'ask' not in usdt_krw_ticker:
+                logger.error("USDT/KRW ask 가격 조회 실패")
                 return None
             
-            if 'last' not in usdt_krw_ticker:
-                logger.error("USDT/KRW last 가격 없음")
-                return None
-            
-            return usdt_krw_ticker['last']
+            return usdt_krw_ticker['ask']
             
         except Exception as e:
             logger.error(f"USDT/KRW 환율 조회 실패: {e}")

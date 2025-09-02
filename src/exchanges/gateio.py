@@ -6,16 +6,23 @@ from gate_api.exceptions import GateApiException
 import logging
 from typing import Dict, Optional, List
 
+logger = logging.getLogger(__name__)
+
 class GateIOExchange:
     """Gate.io Native API 거래소 구현"""
     
     def __init__(self, api_credentials):
         self.exchange_id = 'gateio'
+        
+        # Validate API credentials
+        if not api_credentials:
+            raise ValueError("API credentials not provided for Gate.io exchange")
+        
         self.api_key = api_credentials.get('apiKey')
         self.api_secret = api_credentials.get('secret')
         
-        # Configure logging
-        self.logger = logging.getLogger(f"{__name__}.{self.exchange_id}")
+        if not self.api_key or not self.api_secret:
+            raise ValueError("API key and secret are required for Gate.io exchange")
         
         # Configure Gate.io API
         configuration = gate_api.Configuration(
@@ -25,7 +32,7 @@ class GateIOExchange:
         )
         
         self.api_client = gate_api.ApiClient(configuration)
-        self.spot_api = gate_api.SpotApi(self.api_client)
+        # Only futures API needed - Gate.io is used for shorting only
         self.futures_api = gate_api.FuturesApi(self.api_client)
         
         # Load markets info
@@ -45,9 +52,9 @@ class GateIOExchange:
                     'contract_size': float(contract.quanto_multiplier) if contract.quanto_multiplier else 1,
                     'underlying': underlying
                 }
-            self.logger.info(f"Loaded {len(self.futures_markets)} futures markets")
+            logger.info(f"Loaded {len(self.futures_markets)} futures markets")
         except Exception as e:
-            self.logger.error(f"Failed to load futures markets: {e}")
+            logger.error(f"Failed to load futures markets: {e}")
     
     def get_balance(self, currency: str) -> Optional[Dict]:
         """Get balance for a specific currency"""
@@ -71,20 +78,11 @@ class GateIOExchange:
                         'used': used,
                         'total': total
                     }
-            else:
-                # For other currencies, check spot balance
-                spot_accounts = self.spot_api.list_spot_accounts(currency=currency)
-                for account in spot_accounts:
-                    if account.currency == currency:
-                        return {
-                            'free': float(account.available),
-                            'used': float(account.locked),
-                            'total': float(account.available) + float(account.locked)
-                        }
+            # Only USDT is used for futures trading
             return {'free': 0, 'used': 0, 'total': 0}
             
         except Exception as e:
-            self.logger.error(f"Failed to get balance for {currency}: {e}")
+            logger.error(f"Failed to get balance for {currency}: {e}")
             return None
     
     def get_ticker(self, symbol: str) -> Optional[Dict]:
@@ -105,21 +103,10 @@ class GateIOExchange:
                         'low': float(ticker.low_24h),
                         'volume': float(ticker.volume_24h)
                     }
-            else:
-                # Spot ticker
-                currency_pair = symbol.replace('/', '_')
-                ticker = self.spot_api.get_ticker(currency_pair)
-                return {
-                    'symbol': symbol,
-                    'last': float(ticker.last),
-                    'bid': float(ticker.highest_bid) if ticker.highest_bid else None,
-                    'ask': float(ticker.lowest_ask) if ticker.lowest_ask else None,
-                    'high': float(ticker.high_24h),
-                    'low': float(ticker.low_24h),
-                    'volume': float(ticker.base_volume)
-                }
+            # Only futures tickers are used
+            return None
         except Exception as e:
-            self.logger.error(f"Failed to get ticker for {symbol}: {e}")
+            logger.error(f"Failed to get ticker for {symbol}: {e}")
             return None
     
     def create_market_order(self, symbol: str, side: str, amount: float, params: Optional[Dict] = None) -> Optional[Dict]:
@@ -138,19 +125,23 @@ class GateIOExchange:
                 # So amount here is already in contracts
                 if params and params.get('from_order_executor'):
                     # Amount is already in contracts from OrderExecutor
-                    contracts = int(amount)
+                    # Round to nearest integer for minimum contract requirement
+                    contracts = round(amount)
                 else:
                     # Direct API call, convert from coin amount to contracts
-                    contracts = int(amount / contract_size)
+                    contracts = round(amount / contract_size)
                 
                 if contracts < 1:
-                    self.logger.error(f"Contract amount too small: {amount} {symbol} = {contracts} contracts")
+                    logger.error(f"Contract amount too small: {amount} {symbol} = {contracts} contracts")
                     return None
                 
                 # Create futures order
+                # Gate.io API requires size as string
+                size_str = str(contracts if side == 'buy' else -contracts)  # Negative for sell/short
+                
                 order = gate_api.FuturesOrder(
                     contract=contract,
-                    size=contracts if side == 'buy' else -contracts,  # Negative for sell/short
+                    size=size_str,  # String type as per API spec
                     price='0',  # Market order
                     tif='ioc',  # Immediate or cancel
                     reduce_only=params.get('reduce_only', False) if params else False
@@ -158,7 +149,7 @@ class GateIOExchange:
                 
                 response = self.futures_api.create_futures_order('usdt', order)
                 
-                self.logger.info(f"Futures order placed: {symbol} {side} {contracts} contracts")
+                logger.info(f"Futures order placed: {symbol} {side} {contracts} contracts")
                 
                 return {
                     'id': response.id,
@@ -170,14 +161,14 @@ class GateIOExchange:
                 }
             else:
                 # Spot order - not implemented yet
-                self.logger.error("Spot orders not implemented in native API yet")
+                logger.error("Spot orders not implemented in native API yet")
                 return None
                 
         except GateApiException as ex:
-            self.logger.error(f"Gate API exception: {ex.label}, {ex.message}")
+            logger.error(f"Gate API exception: {ex.label}, {ex.message}")
             return None
         except Exception as e:
-            self.logger.error(f"Failed to create market order: {e}")
+            logger.error(f"Failed to create market order: {e}")
             return None
     
     def get_markets(self) -> Dict:
@@ -192,7 +183,7 @@ class GateIOExchange:
             # This is handled automatically when opening positions
             return True
         except Exception as e:
-            self.logger.error(f"Failed to set leverage: {e}")
+            logger.error(f"Failed to set leverage: {e}")
             return False
     
     def get_positions(self) -> List[Dict]:
@@ -221,7 +212,7 @@ class GateIOExchange:
             return result
             
         except Exception as e:
-            self.logger.error(f"Failed to get positions: {e}")
+            logger.error(f"Failed to get positions: {e}")
             return []
     
     @property

@@ -1,6 +1,3 @@
-"""
-Bithumb Native API 거래소 클래스
-"""
 import hashlib
 import hmac
 import base64
@@ -10,22 +7,24 @@ import requests
 import logging
 from typing import Dict, Optional
 
+logger = logging.getLogger(__name__)
+
 class BithumbExchange:
     """Bithumb Native API 거래소 구현"""
     
     def __init__(self, api_key: str, api_secret: str):
         self.exchange_id = 'bithumb'
+        
+        # Validate API credentials
+        if not api_key or not api_secret:
+            raise ValueError("API credentials not provided for Bithumb exchange")
+        
         self.api_key = api_key
         self.api_secret = api_secret
         
-        # Configure logging
-        self.logger = logging.getLogger(f"{__name__}.{self.exchange_id}")
-        
-        # API endpoints
         self.public_api_url = "https://api.bithumb.com/public"
         self.private_api_url = "https://api.bithumb.com"
-        
-        # Session for HTTP requests
+
         self.session = requests.Session()
         self.session.headers.update({
             'Api-Key': self.api_key,
@@ -70,10 +69,10 @@ class BithumbExchange:
             if data.get('status') == '0000':
                 return data.get('data')
             else:
-                self.logger.error(f"API error: {data.get('message')}")
+                logger.error(f"API error: {data.get('message')}")
                 return None
         except Exception as e:
-            self.logger.error(f"Public API call failed: {e}")
+            logger.error(f"Public API call failed: {e}")
             return None
     
     def _private_api_call(self, endpoint: str, params: Dict) -> Optional[Dict]:
@@ -95,10 +94,10 @@ class BithumbExchange:
                 # Debug print for specific errors
                 error_msg = data.get('message', 'Unknown error')
                 error_code = data.get('status', 'Unknown')
-                self.logger.error(f"API error [{error_code}]: {error_msg}")
+                logger.error(f"API error [{error_code}]: {error_msg}")
                 return None  # Return None on error
         except Exception as e:
-            self.logger.error(f"Private API call failed: {e}")
+            logger.error(f"Private API call failed: {e}")
             return None
     
     def get_ticker(self, symbol: str) -> Optional[Dict]:
@@ -140,7 +139,7 @@ class BithumbExchange:
                 return result
             return None
         except Exception as e:
-            self.logger.error(f"Failed to get ticker for {symbol}: {e}")
+            logger.error(f"Failed to get ticker for {symbol}: {e}")
             return None
     
     def get_balance(self, currency: str) -> Optional[Dict]:
@@ -154,30 +153,20 @@ class BithumbExchange:
             
             data = self._private_api_call('/info/balance', params)
             
-            if data:
-                # Debug print - comment out after debugging
-                # print(f"Balance data for {currency}: {data}")
+            if data and isinstance(data, dict):
+                # Bithumb returns balances with currency code in lowercase
+                currency_lower = currency.lower()
                 
-                # Handle different response formats
-                if isinstance(data, dict):
-                    # Bithumb returns balances with currency code in lowercase
-                    currency_lower = currency.lower()
-                    
-                    # For KRW, directly use the provided values
-                    if currency.upper() == 'KRW':
-                        total = float(data.get('total_krw', 0))
-                        in_use = float(data.get('in_use_krw', 0))
-                        available = float(data.get('available_krw', 0))
-                    else:
-                        # For other currencies, use currency-specific keys
-                        total = float(data.get(f'total_{currency_lower}', 0))
-                        in_use = float(data.get(f'in_use_{currency_lower}', 0))
-                        available = float(data.get(f'available_{currency_lower}', 0))
+                # For KRW, directly use the provided values
+                if currency.upper() == 'KRW':
+                    total = float(data.get('total_krw', 0))
+                    in_use = float(data.get('in_use_krw', 0))
+                    available = float(data.get('available_krw', 0))
                 else:
-                    # If data is a string or other format
-                    total = 0
-                    in_use = 0
-                    available = 0
+                    # For other currencies, use currency-specific keys
+                    total = float(data.get(f'total_{currency_lower}', 0))
+                    in_use = float(data.get(f'in_use_{currency_lower}', 0))
+                    available = float(data.get(f'available_{currency_lower}', 0))
                 
                 return {
                     'free': available,
@@ -186,7 +175,7 @@ class BithumbExchange:
                 }
             return {'free': 0, 'used': 0, 'total': 0}
         except Exception as e:
-            self.logger.error(f"Failed to get balance for {currency}: {e}")
+            logger.error(f"Failed to get balance for {currency}: {e}")
             return {'free': 0, 'used': 0, 'total': 0}
     
     def create_market_order(self, symbol: str, side: str, amount: float, params: Optional[Dict] = None) -> Optional[Dict]:
@@ -206,17 +195,17 @@ class BithumbExchange:
                 # Get current price to calculate crypto units
                 ticker = self.get_ticker(symbol)
                 if not ticker:
-                    self.logger.error(f"Cannot get ticker for {symbol}")
+                    logger.error(f"Cannot get ticker for {symbol}")
                     return None
                 
-                # Use ask price for buy orders (more conservative)
-                price = ticker.get('ask') or ticker.get('last')
+                # Use ask price for buy orders (실제 매수 가격)
+                price = ticker.get('ask')
                 if not price:
-                    self.logger.error(f"No price available for {symbol}")
+                    logger.error(f"No ask price available for {symbol}")
                     return None
                 
                 # Calculate crypto units from KRW amount
-                # Round to 4 decimal places as Bithumb requires
+                # Bithumb API 자동거래는 4자리까지만 지원
                 crypto_units = round(amount / price, 4)
                 
                 endpoint = '/trade/market_buy'
@@ -232,13 +221,13 @@ class BithumbExchange:
                 order_params = {
                     'order_currency': base,
                     'payment_currency': quote,
-                    'units': str(round(amount, 4))  # Crypto amount for market sell
+                    'units': str(round(amount, 4))  # API 자동거래는 4자리까지 지원
                 }
             
             data = self._private_api_call(endpoint, order_params)
             
             if data:
-                self.logger.info(f"Market order placed: {symbol} {side} {amount}")
+                logger.info(f"Market order placed: {symbol} {side} {amount}")
                 
                 # Parse response based on Bithumb's actual format
                 order_id = data.get('order_id', 'unknown')
@@ -266,7 +255,7 @@ class BithumbExchange:
                 return None
             
         except Exception as e:
-            self.logger.error(f"Failed to create market order: {e}")
+            logger.error(f"Failed to create market order: {e}")
             return None
     
     def get_markets(self) -> Dict:
@@ -275,9 +264,9 @@ class BithumbExchange:
         return {}
     
     def get_usdt_krw_price(self) -> Optional[float]:
-        """Get USDT/KRW price"""
+        """Get USDT/KRW price (ask price for buying)"""
         ticker = self.get_ticker('USDT/KRW')
-        return ticker['last'] if ticker else None
+        return ticker['ask'] if ticker else None
     
     @property
     def exchange(self):

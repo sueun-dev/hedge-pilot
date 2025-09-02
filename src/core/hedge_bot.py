@@ -8,6 +8,7 @@ from datetime import datetime
 from src.config import settings
 from src.core.premium_calculator import PremiumCalculator
 from src.core.order_executor import OrderExecutor
+from src.core.position_balancer import PositionBalancer
 from src.managers.position_manager import PositionManager
 from src.managers.timer_manager import TimerManager
 
@@ -18,6 +19,10 @@ class HedgeBot:
     """레드플래그 헤징 봇"""
     
     def __init__(self, korean_exchange, futures_exchange):
+        # Validate exchanges are not None
+        if korean_exchange is None or futures_exchange is None:
+            raise ValueError("Both korean_exchange and futures_exchange must be provided")
+        
         self.korean_exchange = korean_exchange
         self.futures_exchange = futures_exchange
         
@@ -29,6 +34,12 @@ class HedgeBot:
         self.timer_manager = TimerManager()
         self.premium_calculator = PremiumCalculator(korean_exchange, futures_exchange)
         self.order_executor = OrderExecutor(korean_exchange, futures_exchange)
+        self.position_balancer = PositionBalancer(
+            self.position_manager, 
+            self.order_executor,
+            korean_exchange,
+            futures_exchange
+        )
         
         # 실패 추적
         self.failed_attempts: Dict[str, int] = {}
@@ -64,6 +75,19 @@ class HedgeBot:
             
             if existing_value > 0:
                 logger.info(f"📊 기존 {symbol} 포지션 발견: ${existing_value:.2f}")
+                
+                # 초기 균형 체크 및 자동 리밸런싱
+                balance = self.position_balancer.check_position_balance(symbol)
+                if balance and balance.needs_rebalancing:
+                    logger.warning(
+                        f"⚠️ {symbol} 초기 헤지 불균형 감지! "
+                        f"갭: ${balance.gap_usd:.2f}"
+                    )
+                    logger.info(f"🔄 자동 리밸런싱 시작...")
+                    if self.position_balancer.rebalance_position(symbol):
+                        logger.info(f"✅ {symbol} 초기 리밸런싱 완료")
+                    else:
+                        logger.error(f"❌ {symbol} 초기 리밸런싱 실패 - 수동 확인 필요")
             
             # 타이머 초기화
             self.timer_manager.initialize_symbol(symbol)
@@ -137,6 +161,12 @@ class HedgeBot:
                 self.position_manager.update_position(symbol, increment)
                 logger.info(f"📈 {symbol} 포지션 구축: ${increment:.2f}")
                 self.failed_attempts[symbol] = 0
+                
+                # 포지션 균형 체크 및 리밸런싱
+                balance = self.position_balancer.check_position_balance(symbol)
+                if balance and balance.needs_rebalancing:
+                    logger.info(f"🔄 {symbol} 포지션 리밸런싱 필요")
+                    self.position_balancer.rebalance_position(symbol)
             else:
                 self._handle_failure(symbol)
                 
@@ -176,6 +206,9 @@ class HedgeBot:
             
             if success:
                 logger.info(f"🎯 {symbol} 전체 포지션 청산! 프리미엄: {premium:.2f}%")
+                
+                # 전체 청산시 균형 조정 불필요 - 포지션이 없음
+                
                 self._cleanup_symbol(symbol)
             else:
                 logger.error(f"❌ {symbol} 전체 청산 실패. 다음 사이클에 재시도.")
@@ -207,6 +240,10 @@ class HedgeBot:
                 self.position_manager.update_position(symbol, -close_amount)
                 
                 logger.info(f"💰 {symbol} {close_percentage}% 이익 실현!")
+                
+                # 부분 청산 후 균형 조정
+                self.position_balancer.balance_after_close(symbol, close_percentage)
+                
                 self.failed_attempts[symbol] = 0
             else:
                 # 실패시 타이머 복원
@@ -241,6 +278,7 @@ class HedgeBot:
                 logger.warning(f"{symbol} 주문이 이미 진행중")
                 return True
         return False
+    
     
     def _print_status(self, symbol: str, premium: float, position_value: float) -> None:
         """상태 출력"""

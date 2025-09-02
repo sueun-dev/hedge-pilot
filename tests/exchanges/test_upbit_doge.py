@@ -18,11 +18,11 @@ from src.exchanges.upbit import UpbitExchange
 
 def main():
     # API 키 확인
-    api_key = os.getenv('UPBIT_ACCESS_KEY')
-    api_secret = os.getenv('UPBIT_SECRET_KEY')
+    api_key = os.getenv('UPBIT_API_KEY')
+    api_secret = os.getenv('UPBIT_API_SECRET')
     
     if not api_key or not api_secret:
-        print("❌ UPBIT_ACCESS_KEY와 UPBIT_SECRET_KEY가 .env에 설정되어있지 않습니다")
+        print("❌ UPBIT_API_KEY와 UPBIT_API_SECRET이 .env에 설정되어있지 않습니다")
         return
     
     try:

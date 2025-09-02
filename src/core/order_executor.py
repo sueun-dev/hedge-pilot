@@ -17,11 +17,11 @@ class OrderExecutor:
     
     def execute_hedge_position(self, symbol: str, amount_usd: float) -> bool:
         """
-        헤지 포지션 실행 (현물 매수 + 선물 숏)
+        헤지 포지션 실행 (현물 매수 + 선물 숏) - Gate.io 계약수에 정확히 맞춤
         
         Args:
             symbol: 심볼
-            amount_usd: USD 금액
+            amount_usd: 대략적인 USD 금액 (실제로는 계약수에 맞춰 조정됨)
             
         Returns:
             성공 여부
@@ -34,40 +34,53 @@ class OrderExecutor:
             
             krw_ask_price, futures_bid_price, usdt_krw_rate = prices
             
-            # 수량 계산
-            quantity = amount_usd / futures_bid_price
+            # 1단계: 대략적인 수량 계산
+            approx_quantity = amount_usd / futures_bid_price
             
-            # 빗썸은 8자리 반올림
+            # 2단계: Gate.io 정수 계약수 계산
+            futures_contracts = self._calculate_futures_quantity(symbol, approx_quantity)
+            if futures_contracts is None:
+                return False
+            
+            # 3단계: Gate.io 계약수에서 실제 코인 개수 역산
+            markets = self.futures_exchange.get_markets()
+            futures_symbol = f"{symbol}/USDT:USDT"
+            contract_size = markets.get(futures_symbol, {}).get('contract_size', 1)
+            exact_quantity = futures_contracts * contract_size
+            
+            # 빗썸은 4자리 반올림 (API 자동거래)
             if self.korean_exchange.exchange_id.lower() == 'bithumb':
-                quantity = round(quantity, 8)
+                exact_quantity = round(exact_quantity, 4)
             
-            # KRW 금액 계산
-            krw_amount = quantity * krw_ask_price
+            # 4단계: 정확한 금액 재계산
+            krw_amount = exact_quantity * krw_ask_price
             actual_usd_value = krw_amount / usdt_krw_rate
             
+            # 금액 차이 로깅
+            diff_percent = abs(actual_usd_value - amount_usd) / amount_usd * 100
+            
             logger.info(
-                f"주문 계산: {quantity:.4f} {symbol}, "
-                f"KRW: {krw_amount:,.0f}, USD: ${actual_usd_value:.2f}"
+                f"헤지 수량 조정: 요청 ${amount_usd:.2f} → 실제 ${actual_usd_value:.2f} "
+                f"(차이 {diff_percent:.1f}%)"
+            )
+            logger.info(
+                f"완벽한 헤지: {exact_quantity:.8f} {symbol} = "
+                f"{futures_contracts} contracts (계약크기: {contract_size})"
             )
             
-            # 잔고 확인
-            if not self._check_balances(krw_amount, amount_usd):
+            # 잔고 확인 (조정된 금액으로)
+            if not self._check_balances(krw_amount, actual_usd_value):
                 return False
             
-            # 선물 수량 계산 (GateIO는 계약 단위)
-            futures_quantity = self._calculate_futures_quantity(symbol, quantity)
-            if futures_quantity is None:
-                return False
-            
-            # 동시 주문 실행
+            # 동시 주문 실행 (정확히 같은 수량)
             success = self._execute_concurrent_orders(
-                symbol, quantity, futures_quantity, 'open'
+                symbol, exact_quantity, futures_contracts, 'open'
             )
             
             if success:
                 logger.info(
-                    f"헤지 포지션 실행 성공: {quantity:.4f} {symbol} "
-                    f"(포지션 가치: ${amount_usd:.2f})"
+                    f"완벽한 헤지 포지션 실행: {exact_quantity:.8f} {symbol} = "
+                    f"{futures_contracts} contracts (${actual_usd_value:.2f})"
                 )
             
             return success
@@ -122,9 +135,9 @@ class OrderExecutor:
                 # 부분 청산 시 계산된 수량과 보유량 중 작은 값 사용
                 quantity = min(ideal_quantity, actual_spot_quantity)
                 
-            # 빗썸은 8자리 반올림
+            # 빗썸은 4자리 반올림 (API 자동거래)
             if self.korean_exchange.exchange_id.lower() == 'bithumb':
-                quantity = round(quantity, 8)
+                quantity = round(quantity, 4)
             
             # 수량이 너무 작으면 중단
             if quantity < 0.00000001:
@@ -204,12 +217,12 @@ class OrderExecutor:
             
             futures_bid_price = futures_ticker['bid']  # 숏 진입 시 실제 체결가
             
-            # USDT/KRW 환율
+            # USDT/KRW 환율 (KRW를 USD로 변환 시 ask 사용)
             usdt_krw_ticker = self.korean_exchange.get_ticker('USDT/KRW')
-            if not usdt_krw_ticker or 'last' not in usdt_krw_ticker:
+            if not usdt_krw_ticker or 'ask' not in usdt_krw_ticker:
                 logger.error("USDT/KRW 환율 조회 실패")
                 return None
-            usdt_krw_rate = usdt_krw_ticker['last']
+            usdt_krw_rate = usdt_krw_ticker['ask']  # KRW → USD 변환 시 ask 사용
             
             return krw_ask_price, futures_bid_price, usdt_krw_rate
             
@@ -230,20 +243,33 @@ class OrderExecutor:
                         logger.error(f"{symbol} contract_size 정보 없음")
                         return None
                     
-                    # Gate.io는 소수점 계약 지원 - 정확한 수량 계산
-                    contracts = quantity / contract_size
+                    # Gate.io는 정수 계약만 지원 - 반올림하여 가장 가까운 정수로
+                    contracts_exact = quantity / contract_size
                     
-                    # 최소 1 USD 확인 (BTC $70,000 기준 약 0.143 contracts)
+                    # 한국 거래소와 동일한 수량 맞추기 위해 올림/내림 결정
+                    # 0.5 이상이면 올림, 미만이면 내림
+                    if contracts_exact >= 0.5:
+                        contracts = round(contracts_exact)
+                    else:
+                        # 너무 작으면 최소 1계약
+                        contracts = max(1, int(contracts_exact))
+                    
+                    # 최소 1 계약 확인
                     if contracts < 1:
-                        logger.error(
-                            f"수량이 너무 작음: {quantity:.4f} {symbol} = "
-                            f"{contracts:.4f} contracts (최소: 1)"
+                        logger.warning(
+                            f"계산된 계약수가 1 미만: {quantity:.4f} {symbol} = "
+                            f"{contracts_exact:.4f} contracts, 1계약으로 조정"
                         )
-                        return None
+                        contracts = 1
+                    
+                    # 실제 거래될 수량 계산 (반올림으로 인한 차이)
+                    actual_quantity = contracts * contract_size
+                    diff_percent = abs(actual_quantity - quantity) / quantity * 100
                     
                     logger.info(
-                        f"GateIO 선물: {quantity:.8f} {symbol} = "
-                        f"{contracts:.4f} contracts (계약 크기: {contract_size})"
+                        f"GateIO 선물: {quantity:.8f} {symbol} 요청 → "
+                        f"{contracts} contracts 주문 (실제: {actual_quantity:.8f} {symbol}, "
+                        f"차이: {diff_percent:.2f}%)"
                     )
                     return contracts
             
